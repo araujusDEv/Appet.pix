@@ -272,6 +272,49 @@ function ensureSeed() {
   }
 }
 ensureSeed();
+
+// Recovery is an operator-only startup action, never an HTTP endpoint.
+// A request ID is consumed in the same transaction as the password update.
+function recoverAdminFromEnvironment() {
+  const requestId = process.env.ADMIN_RECOVERY_ID;
+  if (!requestId) return;
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(requestId)) {
+    throw new Error('ADMIN_RECOVERY_ID deve ter de 16 a 128 letras, numeros, hifens ou sublinhados.');
+  }
+  const marker = 'admin-recovery:' + crypto.createHash('sha256').update(requestId).digest('hex');
+  if (db.prepare('SELECT 1 FROM app_state WHERE key=?').get(marker)) {
+    console.log('Recuperacao administrativa ja aplicada. Remova ADMIN_RECOVERY_ID do painel.');
+    return;
+  }
+  const email = normalizeEmail(process.env.ADMIN_EMAIL || '');
+  const password = process.env.ADMIN_PASSWORD;
+  if (!validEmail(email) || !validPassword(password) || password.length < 12 || password !== password.trim()) {
+    throw new Error('Recuperacao: configure ADMIN_EMAIL e ADMIN_PASSWORD com 12 a 128 caracteres, letras e numeros, sem espacos nas extremidades.');
+  }
+  const target = db.prepare('SELECT id,role FROM users WHERE email=? COLLATE NOCASE').get(email);
+  if (!target || target.role !== 'admin') {
+    throw new Error('Recuperacao: ADMIN_EMAIL precisa corresponder a uma conta administrativa existente. Nenhuma conta foi alterada.');
+  }
+  const credentials = hashPassword(password);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    // Recheck under the write lock if multiple processes initialize together.
+    if (!db.prepare('SELECT 1 FROM app_state WHERE key=?').get(marker)) {
+      db.prepare('UPDATE users SET password_hash=?,password_salt=? WHERE id=? AND role=?')
+        .run(credentials.hash, credentials.salt, target.id, 'admin');
+      db.prepare('DELETE FROM sessions WHERE user_id=?').run(target.id);
+      db.prepare('INSERT INTO app_state(key,value,updated_at) VALUES(?,?,?)')
+        .run(marker, JSON.stringify({userId:target.id,appliedAt:now(),source:'hosting-environment'}), now());
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+  console.log('Recuperacao administrativa concluida. Sessoes antigas revogadas. Remova ADMIN_RECOVERY_ID do painel.');
+}
+recoverAdminFromEnvironment();
+
 // Preserve adoption status separately from publication approval.
 const adoptionRecords = loadState('animals');
 let adoptionMigration = false;
