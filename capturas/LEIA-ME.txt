@@ -1,0 +1,1 @@
+Capturas dos fluxos anteriores da Appet, feitas com dados fictícios. Login e cadastro foram corrigidos posteriormente; esta revisão foi verificada por testes HTTP e de código.
